@@ -17,9 +17,6 @@ from sklearn.metrics.pairwise import linear_kernel
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 
-
-
-
 class HFDataSearch:
     def __init__(self, like_thr=3, dwn_thr=50) -> None:
         """
@@ -266,7 +263,7 @@ class ArxivSearch:
             except Exception as e:
                 retry_count += 1
                 if retry_count < max_retries:
-                    # 递增延时
+                    # incremental backoff
                     time.sleep(2 * retry_count)
                     continue
                 
@@ -329,30 +326,34 @@ class ArxivSearch:
         return pdf_text
 
 
+def _run_code(code_str, queue):
+    """Module-level function — picklable by multiprocessing."""
+    import matplotlib
+    matplotlib.use('Agg')
+
+    import io, sys, traceback
+    output_capture = io.StringIO()
+    sys.stdout = output_capture
+    try:
+        exec(code_str, {})
+    except Exception as e:
+        output_capture.write(f"[CODE EXECUTION ERROR]: {str(e)}\n")
+        traceback.print_exc(file=output_capture)
+    finally:
+        queue.put(output_capture.getvalue())
+        sys.stdout = sys.__stdout__
+
+
+# Remove the set_start_method block entirely, and change execute_code:
+
 def execute_code(code_str, timeout=180):
-    # Guard: block resource-intensive/destructive patterns
-    if "load_dataset('pubmed" in code_str:
-        return "[CODE EXECUTION ERROR] pubmed download too slow."
-    if "exit(" in code_str:
-        return "[CODE EXECUTION ERROR] exit() is not allowed."
+    for guard in ["load_dataset('pubmed", "exit(", "quit(", "sys.exit("]:
+        if guard in code_str:
+            return f"[CODE EXECUTION ERROR]: '{guard}' is not allowed."
 
-    def run_code(queue):
-        import matplotlib
-        matplotlib.use('Agg')  # headless-safe plotting
-
-        output_capture = io.StringIO()
-        sys.stdout = output_capture
-        try:
-            exec(code_str, {})  # clean namespace
-        except Exception as e:
-            output_capture.write(f"[CODE EXECUTION ERROR]: {str(e)}\n")
-            traceback.print_exc(file=output_capture)
-        finally:
-            queue.put(output_capture.getvalue())
-            sys.stdout = sys.__stdout__
-
-    queue = multiprocessing.Queue()
-    process = multiprocessing.Process(target=run_code, args=(queue,))
+    ctx = multiprocessing.get_context("spawn")  # scoped, doesn't affect global state
+    queue = ctx.Queue()
+    process = ctx.Process(target=_run_code, args=(code_str, queue))
     process.start()
     process.join(timeout)
 
@@ -360,4 +361,9 @@ def execute_code(code_str, timeout=180):
         process.terminate()
         process.join()
         return f"[CODE EXECUTION ERROR]: Exceeded {timeout}s timeout."
-    return queue.get()
+
+    try:
+        return queue.get(timeout=5)
+    except Exception:
+        return "[CODE EXECUTION ERROR]: Child process failed to return output."
+
