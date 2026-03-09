@@ -81,16 +81,7 @@ To select a specific llm set the flag `--llm-backend="llm_model"` for example `-
     pip install -r requirements.txt
     ```
 
-4. **Install Higher Version of Gradio**
-    ```bash
-    pip install gradio==4.44.1
-    ```
-
-> [!NOTE]
-> This is only required for the current version of web interface. 
-> We will move to `Flask` in the future for capability of the package.
-
-5. **Install pdflatex [OPTIONAL]**
+4. **Install pdflatex [OPTIONAL]**
 
     ## Instructions for Ubuntu:
     ```bash
