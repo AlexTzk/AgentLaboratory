@@ -1,43 +1,83 @@
 import os, re
+import sys
 import shutil
+import platform
 import tiktoken
 import subprocess
+
+
+
+def _find_pdflatex() -> str:
+    """
+    Resolve the pdflatex binary path.
+    - On macOS, checks common MacTeX/TeXShop install locations if not on PATH.
+    - On all platforms, falls back to 'pdflatex' and lets the OS raise the error.
+    """
+    # First try: already on PATH (works on Linux, CI, and macOS if ~/.zshrc exports it)
+    found = shutil.which("pdflatex")
+    if found:
+        return found
+
+    # Second try: macOS-specific known locations (MacTeX via TeXShop or standalone)
+    if platform.system() == "Darwin":
+        macos_candidates = [
+            "/Library/TeX/texbin/pdflatex",           # MacTeX 2021+ default symlink dir
+            "/usr/local/texlive/2024/bin/universal-darwin/pdflatex",
+            "/usr/local/texlive/2023/bin/universal-darwin/pdflatex",
+            "/usr/local/texlive/2024/bin/arm64-darwin/pdflatex",  # Apple Silicon
+            "/usr/local/texlive/2023/bin/arm64-darwin/pdflatex",
+            "/usr/texbin/pdflatex",                   # Legacy MacTeX location
+        ]
+        for candidate in macos_candidates:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+    # Final fallback: let subprocess raise a clear FileNotFoundError
+    return "pdflatex"
 
 
 def compile_latex(latex_code, compile=True, output_filename="output.pdf", timeout=30):
     latex_code = latex_code.replace(
         r"\documentclass{article}",
         "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{amssymb}\n\\usepackage{array}\n\\usepackage{algorithm}\n\\usepackage{algorithmicx}\n\\usepackage{algpseudocode}\n\\usepackage{booktabs}\n\\usepackage{colortbl}\n\\usepackage{color}\n\\usepackage{enumitem}\n\\usepackage{fontawesome5}\n\\usepackage{float}\n\\usepackage{graphicx}\n\\usepackage{hyperref}\n\\usepackage{listings}\n\\usepackage{makecell}\n\\usepackage{multicol}\n\\usepackage{multirow}\n\\usepackage{pgffor}\n\\usepackage{pifont}\n\\usepackage{soul}\n\\usepackage{sidecap}\n\\usepackage{subcaption}\n\\usepackage{titletoc}\n\\usepackage[symbol]{footmisc}\n\\usepackage{url}\n\\usepackage{wrapfig}\n\\usepackage{xcolor}\n\\usepackage{xspace}")
-    #print(latex_code)
+
     dir_path = "research_dir/tex"
     tex_file_path = os.path.join(dir_path, "temp.tex")
-    # Write the LaTeX code to the .tex file in the specified directory
     with open(tex_file_path, "w") as f:
         f.write(latex_code)
 
     if not compile:
-        return f"Compilation successful"
+        return "Compilation successful"
 
-    # Compiling the LaTeX code using pdflatex with non-interactive mode and timeout
+    pdflatex = _find_pdflatex()
+
     try:
         result = subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode", "temp.tex"],
-            check=True,                   # Raises a CalledProcessError on non-zero exit codes
-            stdout=subprocess.PIPE,        # Capture standard output
-            stderr=subprocess.PIPE,        # Capture standard error
-            timeout=timeout,               # Timeout for the process
+            [pdflatex, "-interaction=nonstopmode", "temp.tex"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
             cwd=dir_path
         )
-
-        # If compilation is successful, return the success message
         return f"Compilation successful: {result.stdout.decode('utf-8')}"
 
+    except FileNotFoundError:
+        return (
+            "[CODE EXECUTION ERROR]: pdflatex not found. "
+            f"Searched PATH and macOS TeX locations. "
+            f"Ensure MacTeX is installed (https://www.tug.org/mactex/) "
+            f"or add /Library/TeX/texbin to your PATH. "
+            f"Resolved binary: '{pdflatex}'"
+        )
     except subprocess.TimeoutExpired:
-        # If the compilation takes too long, return a timeout message
         return "[CODE EXECUTION ERROR]: Compilation timed out after {} seconds".format(timeout)
     except subprocess.CalledProcessError as e:
-        # If there is an error during LaTeX compilation, return the error message
-        return f"[CODE EXECUTION ERROR]: Compilation failed: {e.stderr.decode('utf-8')} {e.output.decode('utf-8')}. There was an error in your latex."
+        return (
+            f"[CODE EXECUTION ERROR]: Compilation failed: "
+            f"{e.stderr.decode('utf-8')} {e.output.decode('utf-8')}. "
+            f"There was an error in your latex."
+        )
 
 
 def count_tokens(messages, model="gpt-4"):
@@ -118,4 +158,77 @@ def extract_prompt(text, word):
     extracted_code = "\n".join(code_blocks).strip()
     return extracted_code
 
+def build_task_note(task_note, **kwargs):
+    # Replace the `{{variable}}` placeholders in the task note with the provided values
+    for note in task_note:
+        for key, value in kwargs.items():
+            placeholder = f"{{{{{key}}}}}"
+            note["note"] = note["note"].replace(placeholder, str(value))
+    return task_note
 
+def remove_thinking_process(text):
+    """
+    Remove the first occurrence of a substring enclosed in <thinking>...</thinking> or <think>...</think>,
+    even if it spans multiple lines.
+    """
+    pattern = r'<(?:thinking|think)>.*?</(?:thinking|think)>'
+    # Using re.DOTALL allows '.' to match newline characters.
+    return re.sub(pattern, '', text, count=1, flags=re.DOTALL)
+
+# Define allowed phases and variables according to your guide
+ALLOWED_PHASES = [
+    "literature review", "plan formulation",
+    "data preparation", "running experiments",
+    "results interpretation", "report writing",
+    "report refinement"
+]
+
+ALLOWED_VARIABLES = {
+    "research_topic", "api_key", "deepseek_api_key",
+    "google_api_key", "anthropic_api_key", "language",
+    "llm_backend"
+}
+
+def validate_task_note_config(task_note_config):
+    """
+    Validate the task note configuration based on the allowed phases and variables.
+    """
+    # Ensure the configuration is a list
+    if not isinstance(task_note_config, list):
+        raise ValueError("Configuration must be a list.")
+
+    for idx, note in enumerate(task_note_config):
+        # Each note should be a dictionary
+        if not isinstance(note, dict):
+            raise ValueError(f"Entry {idx} must be a dictionary.")
+
+        # Must contain both 'phases' and 'note'
+        if "phases" not in note or "note" not in note:
+            raise ValueError(f"Entry {idx} must have both 'phases' and 'note' keys.")
+
+        # Validate phases: it must be a list and contain only allowed values
+        phases = note["phases"]
+        if not isinstance(phases, list):
+            raise ValueError(f"'phases' in entry {idx} must be a list.")
+        for phase in phases:
+            if phase not in ALLOWED_PHASES:
+                raise ValueError(
+                    f"Invalid phase '{phase}' in entry {idx}. "
+                    f"Allowed phases are: {ALLOWED_PHASES}"
+                )
+
+        # Validate note: it must be a string
+        text = note["note"]
+        if not isinstance(text, str):
+            raise ValueError(f"'note' in entry {idx} must be a string.")
+
+        # Validate the variables inside the note using a regex that matches double curly braces
+        variables_found = re.findall(r"{{\s*(\w+)\s*}}", text)
+        for var in variables_found:
+            if var not in ALLOWED_VARIABLES:
+                raise ValueError(
+                    f"Invalid variable '{var}' in note in entry {idx}. "
+                    f"Allowed variables are: {ALLOWED_VARIABLES}"
+                )
+
+    return True

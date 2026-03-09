@@ -103,7 +103,7 @@ class Edit(Command):
             "============= CODE EDITING TOOL =============\n"
             "You also have access to a code editing tool. \n"
             "This tool allows you to replace lines indexed n through m (n:m) of the current code with as many lines of new code as you want to add. This removal is inclusive meaning that line n and m and everything between n and m is removed. This will be the primary way that you interact with code. \n"
-            "You can edit code using the following command: ```EDIT N M\n<new lines to replace old lines>\n``` EDIT is the word EDIT, N is the first line index you want to replace and M the the last line index you want to replace (everything inbetween will also be removed), and <new lines to replace old lines> will be the new code that is replacing the old code. Before changing the existing code to be your new code, your new code will be tested and if it returns an error it will not replace the existing code. Your changes should significantly change the functionality of the code."
+            "You can edit code using the following command: ```EDIT N M\n<new lines to replace old lines>\n``` EDIT is the word EDIT, N is the first line index you want to replace and M the last line index you want to replace (everything inbetween will also be removed), and <new lines to replace old lines> will be the new code that is replacing the old code. Before changing the existing code to be your new code, your new code will be tested and if it returns an error it will not replace the existing code. Your changes should significantly change the functionality of the code."
         )
 
     def execute_command(self, *args) -> str:
@@ -149,28 +149,30 @@ class Edit(Command):
 
 
 def get_score(outlined_plan, code, code_return, REWARD_MODEL_LLM, attempts=3, openai_api_key=None):
-    e = str()
+    last_err = str()
     for _attempt in range(attempts):
         try:
-            # todo: have a reward function here
             sys = (
-                f"You are a professor agent who is serving as an expert reward model that can read a research plan, research code, and code output and are able to determine how well a model followed the plan, built the code, and got the proper output scored from 0 to 1 as a float.\n\n"
-                f"You must structure your score exactly in the following way: ```SCORE\n<score here>\n``` where SCORE is just the word score, <score here> is a floating point number between 0 and 1 representing how well the model followed the plan, built the code, and got the proper output."
+                f"You are a professor agent who is serving as an expert reward model..."
+                f"You must structure your score exactly in the following way: ```SCORE\n<score here>\n```..."
             )
             scoring = query_model(
                 model_str=f"{REWARD_MODEL_LLM}",
                 system_prompt=sys,
                 openai_api_key=openai_api_key,
                 prompt=(
-                    f"Outlined in the following text is the research plan that the machine learning engineer was tasked with building: {outlined_plan}\n\n"
-                    f"The following text is the research code that the model produced: \n{code}\n\n"
-                    f"The following is the output from the model: {code_return}\n\n"), temp=0.6)
+                    f"Research plan: {outlined_plan}\n\n"
+                    f"Code produced: \n{code}\n\n"
+                    f"Output: {code_return}\n\n"
+                ), temp=0.6)
             performance = extract_prompt(text=scoring, word="SCORE")
             performance = float(performance)
             return performance, f"The performance of your submission is: {performance}", True
         except Exception as e:
-            return None, str(e), False
-    return 0, e
+            last_err = str(e)
+            continue   # ← actually retry now
+    return 0, last_err, False
+
 
 
 def code_repair(code, error, ctype, REPAIR_LLM, openai_api_key=None):
@@ -197,7 +199,7 @@ def code_repair(code, error, ctype, REPAIR_LLM, openai_api_key=None):
             "============= CODE EDITING TOOL =============\n"
             "You have access to a code editing tool. \n"
             "This tool allows you to replace lines indexed n through m (n:m) of the current code with as many lines of new code as you want to add. This removal is inclusive meaning that line n and m and everything between n and m is removed. This will be the primary way that you interact with code. \n"
-            "You can edit code using the following command: ```EDIT N M\n<new lines to replace old lines>\n``` EDIT is the word EDIT, N is the first line index you want to replace and M the the last line index you want to replace (everything inbetween will also be removed), and <new lines to replace old lines> will be the new code that is replacing the old code. Before changing the existing code to be your new code, your new code will be tested and if it returns an error it will not replace the existing code.\n"
+            "You can edit code using the following command: ```EDIT N M\n<new lines to replace old lines>\n``` EDIT is the word EDIT, N is the first line index you want to replace and M the last line index you want to replace (everything inbetween will also be removed), and <new lines to replace old lines> will be the new code that is replacing the old code. Before changing the existing code to be your new code, your new code will be tested and if it returns an error it will not replace the existing code.\n"
             "Please use the code editing tool to fix this code."
             "Do not forget the opening ```EDIT N M and the closing ```."
             "Your output should look like the following\n\n```EDIT N M\n<new lines to replace old lines>\n```"
@@ -323,16 +325,21 @@ class MLESolver:
             # sort by score, to make sure lowest are removed in future
             self.best_codes.sort(key=lambda x: x[1], reverse=True)
         return model_resp, cmd_str
-
+        
     def reflect_code(self):
-        """
-        Provide a reflection on produced behavior for next execution
-        @return: (str) language model-produced reflection
-        """
-        code_strs = ("$"*40 + "\n\n").join([self.generate_code_lines(_code[0]) + f"\nCode Return {_code[1]}" for _code in self.best_codes])
+        # best_codes entries: (code_lines, score, code_return)
+        code_strs = ("$"*40 + "\n\n").join([
+            self.generate_code_lines(_code[0]) + f"\nCode Return: {_code[2]}"  # ← [2] not [1]
+            for _code in self.best_codes
+        ])
         code_strs = f"Please reflect on the following sets of code: {code_strs} and come up with generalizable insights that will help you improve your performance on this benchmark."
         syst = self.system_prompt(commands=False) + code_strs
-        return query_model(prompt="Please reflect on ideas for how to improve your current code. Examine the provided code and think very specifically (with precise ideas) on how to improve performance, which methods to use, how to improve generalization on the test set with line-by-line examples below:\n", system_prompt=syst, model_str=f"{self.llm_str}", openai_api_key=self.openai_api_key)
+        return query_model(
+            prompt="Please reflect on ideas for how to improve your current code...\n",
+            system_prompt=syst,
+            model_str=f"{self.llm_str}",
+            openai_api_key=self.openai_api_key
+        )
 
     def process_command(self, model_resp):
         """
@@ -471,34 +478,55 @@ class MLESolver:
         return codestr
 
     def feedback(self, code_return):
-        """
-        Provide execution feedback after command is run
-        @param code_return: (str) return from code execution
-        @return: (str) feedback string
-        """
+        # Safe defaults so both variables are always defined
+        code_str = self.generate_code_lines(self.code_lines)
+        reflect_prompt = "Reflect on your future plans and next steps to improve the code."
+
         if code_return is not None:
-            code_str = self.generate_code_lines(self.code_lines)
             if "[CODE EXECUTION ERROR]" in code_return:
-                print(f"@@@@ ERROR")  # , {code_return.replace('\n', '')}")
-                reflect_prompt = f"This is your code: {code_str}\n\nYour code returned the following error {code_return}. Please provide a detailed reflection on why this error was returned, which lines in the code caused this error, and exactly (line by line) how you hope to fix this in the next update. This step is mostly meant to reflect in order to help your future self fix the error better. Do not provide entirely new code but provide suggestions on how to fix the bug using LINE EDITS."
+                print(f"@@@@ ERROR")
+                reflect_prompt = (
+                    f"This is your code: {code_str}\n\nYour code returned the following error: "
+                    f"{code_return}. Please provide a detailed reflection on why this error was "
+                    f"returned, which lines in the code caused this error, and exactly (line by line) "
+                    f"how you hope to fix this in the next update."
+                )
             elif os.path.exists("submission.csv"):
                 self.prev_working_code = copy(self.code_lines)
-                grade_return = get_score(self.plan, "\n".join(self.prev_working_code), code_return, openai_api_key=self.openai_api_key)[0]
-                print(f"@@@@ SUBMISSION: model score {grade_return}", REWARD_MODEL_LLM=self.llm_str)
-                f"Your code was properly submitted and you have just received a grade for your model.\nYour score was {grade_return}.\n\n"
-                reflect_prompt = f"This is your code: {code_str}\n\nYour code successfully returned a submission csv. Consider further improving your technique through advanced learning techniques, data augmentation, or hyperparamter tuning to increase the score. Please provide a detailed reflection on how to improve your performance, which lines in the code could be improved upon, and exactly (line by line) how you hope to improve this in the next update. This step is mostly meant to reflect in order to help your future self."
-
+                # Fix 4: pass REWARD_MODEL_LLM as positional arg
+                grade_return = get_score(
+                    self.plan,
+                    "\n".join(self.prev_working_code),
+                    code_return,
+                    self.llm_str,                       # ← was missing
+                    openai_api_key=self.openai_api_key
+                )[0]
+                # Fix 5: plain print, no keyword args
+                print(f"@@@@ SUBMISSION: model score {grade_return}")
+                # Fix 6: actually assign/use the message
+                reflect_prompt = (
+                    f"Your code was properly submitted and you have just received a grade for your model.\n"
+                    f"Your score was {grade_return}.\n\n"
+                    f"This is your code: {code_str}\n\nYour code successfully returned a submission csv. "
+                    f"Consider further improving your technique through advanced learning techniques, "
+                    f"data augmentation, or hyperparameter tuning to increase the score."
+                )
                 for file in os.listdir("."):
                     if file.endswith(".csv"):
-                        os.system(f"rm {file}")
+                        os.remove(file)        # Fix minor: replaces os.system("rm ...")
             else:
                 print("@@@@ No return")
-                reflect_prompt = f"This is your code: {code_str}\n\nYour code did not return an error, but also did not successfully submit a submission csv file. Please reflect on how you can improve your submission for the next cycle to submit a file and obtain a high score."
+                reflect_prompt = (
+                    f"This is your code: {code_str}\n\nYour code did not return an error, but also "
+                    f"did not successfully submit a submission csv file. Please reflect on how you can "
+                    f"improve your submission for the next cycle to submit a file and obtain a high score."
+                )
         elif not self.should_execute_code:
             code_return = "No changes were made to the code."
-            reflect_prompt = "Reflect on your future plans and next steps to improve the code."
+
         reflection = self.reflection(reflect_prompt, code_str, code_return)
         return f"Code return: {code_return}\n\nReflection: {reflection}"
+
 
     def reflection(self, reflect_prompt, code_str, code_return):
         """
@@ -518,18 +546,25 @@ class MLESolver:
         """
         return f"\n- The following dataset code will be added to the beginning of your code always, so this does not need to be rewritten: {self.dataset_code}"
 
-    def phase_prompt(self,):
-        """
-        Describe system role and general tips for mle-solver
-        @return: (str) system role
-        """
+    def phase_prompt(self):
         phase_str = (
             "You are an ML engineer and you will be writing the code for a research project.\n"
-            "Your goal is to produce code that obtains final results for a set of research experiments. You should aim for simple code to collect all results, not complex code. You should integrate the provided literature review and the plan to make sure you are implementing everything outlined in the plan. The dataset code will be added to the beginning of your code always, so this does not need to be rewritten. Make sure you do not write functions, only loose code.\n"
-            "I would recommend writing smaller code so you do not run out of time but make sure to work on all points in the plan in the same code. You code should run every experiment outlined in the plan for a single code.\n",
-            "You cannot pip install new libraries, but many machine learning libraries already work. If you wish to use a language model in your code, please use the following:\nAnything you decide to print inside your code will be provided to you as input, and you will be able to see that part of the code. Using print statements is useful for figuring out what is wrong and understanding your code better."
+            "Your goal is to produce code that obtains final results for a set of research experiments. "
+            "You should integrate the provided literature review and the plan to make sure you are "
+            "implementing everything outlined in the plan. The dataset code will be added to the beginning "
+            "of your code always, so this does not need to be rewritten. Make sure you do not write "
+            "functions, only loose code.\n"
+            "I would recommend writing smaller code so you do not run out of time but make sure to work "
+            "on all points in the plan in the same code. Your code should run every experiment outlined "
+            "in the plan for a single code.\n"
+            "You cannot pip install new libraries, but many machine learning libraries already work. "
+            "Anything you decide to print inside your code will be provided to you as input, and you "
+            "will be able to see that part of the code. Using print statements is useful for figuring "
+            "out what is wrong and understanding your code better."
+            # ↑ No trailing comma — this is now a single concatenated string, not a tuple
         )
         return phase_str
+
 
     def role_description(self):
         """

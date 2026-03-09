@@ -5,6 +5,8 @@ import arxiv
 import os, re
 import io, sys
 import numpy as np
+import multiprocessing
+import traceback
 import concurrent.futures
 from pypdf import PdfReader
 from datasets import load_dataset
@@ -14,8 +16,8 @@ from semanticscholar import SemanticScholar
 from sklearn.metrics.pairwise import linear_kernel
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-import traceback
-import concurrent.futures
+
+
 
 
 class HFDataSearch:
@@ -95,7 +97,7 @@ class HFDataSearch:
         :param dwn_w: Weight for downloads.
         :return: List of top N dataset items.
         """
-        if not self.ds or self.description_vectors is None:
+        if self.ds is None or len(self.ds) == 0:
             print("No datasets available to search.")
             return []
 
@@ -181,16 +183,25 @@ class SemanticScholarSearch:
         self.sch_engine = SemanticScholar(retry=False)
 
     def find_papers_by_str(self, query, N=10):
-        paper_sums = list()
-        results = self.sch_engine.search_paper(query, limit=N, min_citation_count=3, open_access_pdf=True)
-        for _i in range(len(results)):
-            paper_sum = f'Title: {results[_i].title}\n'
-            paper_sum += f'Abstract: {results[_i].abstract}\n'
-            paper_sum += f'Citations: {results[_i].citationCount}\n'
-            paper_sum += f'Release Date: year {results[_i].publicationDate.year}, month {results[_i].publicationDate.month}, day {results[_i].publicationDate.day}\n'
-            paper_sum += f'Venue: {results[_i].venue}\n'
-            paper_sum += f'Paper ID: {results[_i].externalIds["DOI"]}\n'
-            paper_sums.append(paper_sum)
+        paper_sums = []
+        try:
+            results = self.sch_engine.search_paper(query, limit=N, min_citation_count=3, open_access_pdf=True)
+        except Exception as e:
+            return []
+        for r in results:
+            try:
+                date = r.publicationDate
+                date_str = f"year {date.year}, month {date.month}, day {date.day}" if date else "unknown"
+                doi = (r.externalIds or {}).get("DOI", "N/A")
+                paper_sum = f"Title: {r.title}\n"
+                paper_sum += f"Abstract: {r.abstract or 'N/A'}\n"
+                paper_sum += f"Citations: {r.citationCount}\n"
+                paper_sum += f"Release Date: {date_str}\n"
+                paper_sum += f"Venue: {r.venue}\n"
+                paper_sum += f"Paper ID: {doi}\n"
+                paper_sums.append(paper_sum)
+            except Exception:
+                continue
         return paper_sums
 
     def retrieve_full_paper_text(self, query):
@@ -263,136 +274,90 @@ class ArxivSearch:
 
     def retrieve_full_paper_text(self, query):
         pdf_text = str()
-        paper = next(arxiv.Client().results(arxiv.Search(id_list=[query])))
-        # Download the PDF to the PWD with a custom filename.
-        paper.download_pdf(filename="downloaded-paper.pdf")
-        # creating a pdf reader object
-        reader = PdfReader('downloaded-paper.pdf')
-        # Iterate over all the pages
-        for page_number, page in enumerate(reader.pages, start=1):
-            # Extract text from the page
-            try:
-                text = page.extract_text()
-            except Exception as e:
-                os.remove("downloaded-paper.pdf")
-                time.sleep(2.0)
-                return "EXTRACTION FAILED"
-
-            # Do something with the text (e.g., print it)
-            pdf_text += f"--- Page {page_number} ---"
-            pdf_text += text
-            pdf_text += "\n"
-        os.remove("downloaded-paper.pdf")
-        time.sleep(2.0)
-        return pdf_text
-
-"""
-import multiprocessing
-import sys
-import io
-import traceback
-
-def execute_code(code_str, timeout=180):
-    if "load_dataset('pubmed" in code_str:
-        return "pubmed Download took way too long. Program terminated"
-
-    def run_code(queue):
-        # Redirect stdout to capture print outputs
-        output_capture = io.StringIO()
-        sys.stdout = output_capture
+        pdf_filename = "downloaded-paper.pdf"  # Temporary PDF filename
 
         try:
-            exec_globals = {}
-            exec(code_str, exec_globals)
+            # Fetch the paper
+            try:
+                paper = next(arxiv.Client().results(arxiv.Search(id_list=[query])))
+            except StopIteration:
+                print(f"No results found for query: {query}")
+                return "NO RESULTS FOUND"
+            except arxiv.HTTPError as e:
+                print(f"Failed to fetch paper {query}: {e}")
+                return f"HTTP ERROR: {e}"
+            except Exception as e:
+                print(f"An unexpected error occurred while fetching paper: {e}")
+                return f"UNEXPECTED ERROR: {e}"
+
+            # Download the PDF file
+            try:
+                paper.download_pdf(filename=pdf_filename)
+            except Exception as e:
+                print(f"Failed to download PDF for paper {query}: {e}")
+                return f"DOWNLOAD ERROR: {e}"
+
+            # Read the PDF file and extract text
+            try:
+                reader = PdfReader(pdf_filename)
+                for page_number, page in enumerate(reader.pages, start=1):
+                    try:
+                        text = page.extract_text()
+                        pdf_text += f"--- Page {page_number} ---\n"
+                        pdf_text += text
+                        pdf_text += "\n"
+                    except Exception as e:
+                        print(f"Failed to extract text from page {page_number}: {e}")
+                        pdf_text += f"--- Page {page_number} ---\n"
+                        pdf_text += "EXTRACTION FAILED\n"
+            except Exception as e:
+                print(f"Failed to read PDF file: {e}")
+                return f"PDF READ ERROR: {e}"
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            return f"UNEXPECTED ERROR: {e}"
+        finally:
+            # Clean up temporary files
+            if os.path.exists(pdf_filename):
+                try:
+                    os.remove(pdf_filename)
+                except Exception as e:
+                    print(f"Failed to delete temporary file {pdf_filename}: {e}")
+            time.sleep(2.0)  # Avoid frequent requests
+
+        return pdf_text
+
+
+def execute_code(code_str, timeout=180):
+    # Guard: block resource-intensive/destructive patterns
+    if "load_dataset('pubmed" in code_str:
+        return "[CODE EXECUTION ERROR] pubmed download too slow."
+    if "exit(" in code_str:
+        return "[CODE EXECUTION ERROR] exit() is not allowed."
+
+    def run_code(queue):
+        import matplotlib
+        matplotlib.use('Agg')  # headless-safe plotting
+
+        output_capture = io.StringIO()
+        sys.stdout = output_capture
+        try:
+            exec(code_str, {})  # clean namespace
         except Exception as e:
             output_capture.write(f"[CODE EXECUTION ERROR]: {str(e)}\n")
             traceback.print_exc(file=output_capture)
         finally:
-            # Put the output in the queue
             queue.put(output_capture.getvalue())
-            # Restore stdout
             sys.stdout = sys.__stdout__
 
-    # Create a multiprocessing Queue to capture the output
     queue = multiprocessing.Queue()
-    # Create a new Process
     process = multiprocessing.Process(target=run_code, args=(queue,))
     process.start()
-    # Wait for the process to finish or timeout
     process.join(timeout)
 
     if process.is_alive():
         process.terminate()
         process.join()
-        return f"[CODE EXECUTION ERROR]: Code execution exceeded the timeout limit of {timeout} seconds. You must reduce the time complexity of your code."
-    else:
-        # Retrieve the output from the queue
-        output = queue.get()
-        return output
-
-"""
-
-import io
-import sys
-import traceback
-import concurrent.futures
-
-
-
-import multiprocessing
-import io
-import sys
-import traceback
-import multiprocessing
-import io
-import sys
-import traceback
-
-
-def execute_code(code_str, timeout=60, MAX_LEN=1000):
-    #print(code_str)
-
-    # prevent plotting errors
-    import matplotlib
-    matplotlib.use('Agg')  # Use the non-interactive Agg backend
-    import matplotlib.pyplot as plt
-
-    # Preventing execution of certain resource-intensive datasets
-    if "load_dataset('pubmed" in code_str:
-        return "[CODE EXECUTION ERROR] pubmed Download took way too long. Program terminated"
-    if "exit(" in code_str:
-        return "[CODE EXECUTION ERROR] The exit() command is not allowed you must remove this."
-    #print(code_str)
-    # Capturing the output
-    output_capture = io.StringIO()
-    sys.stdout = output_capture
-
-    # Create a new global context for exec
-    exec_globals = globals()
-
-    def run_code():
-        try:
-            # Executing the code in the global namespace
-            exec(code_str, exec_globals)
-        except Exception as e:
-            output_capture.write(f"[CODE EXECUTION ERROR]: {str(e)}\n")
-            traceback.print_exc(file=output_capture)
-
-    try:
-        # Running code in a separate thread with a timeout
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_code)
-            future.result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
-        return f"[CODE EXECUTION ERROR]: Code execution exceeded the timeout limit of {timeout} seconds. You must reduce the time complexity of your code."
-    except Exception as e:
-        return f"[CODE EXECUTION ERROR]: {str(e)}"
-    finally:
-        # Restoring standard output
-        sys.stdout = sys.__stdout__
-
-    # Returning the captured output
-    return output_capture.getvalue()[:MAX_LEN]
-
-
-
+        return f"[CODE EXECUTION ERROR]: Exceeded {timeout}s timeout."
+    return queue.get()

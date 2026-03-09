@@ -89,7 +89,7 @@ class Arxiv(Command):
         full_text = extract_prompt(args[0], "FULL_TEXT").split("\n")
         if len(sum_text) == 0 and len(full_text) == 0: return False, None
         if len(sum_text) > 0: return True, ("SUMMARY", sum_text,)
-        if len(full_text) > 0: return True, ("FULL_TEXT", sum_text,)
+        if len(full_text) > 0: return True, ("FULL_TEXT", full_text,)
 
 
 """
@@ -505,7 +505,7 @@ class PaperSolver:
 \\caption{<caption here>}
 \\centering
 \\includegraphics[width=\\textwidth]{Figure_2.png}
-\\label{fig:fig1}
+\\label{fig:fig2}
 \\end{figure}\n"""
             if os.path.exists("Figure_1.png") and os.path.exists("Figure_2.png"):
                 methods_str += f"You ABSOLUTELY must without fail also include Figure_1.png and Figure_2.png in your paper using {fig1_text} and {fig2_text} on a new line. Make sure to place these figures in separate locations."
